@@ -20,6 +20,7 @@ import type {
   InferenceAdmissionSnapshot,
   InferenceAuthRejectionReason,
 } from "@/lib/services/inference-auth-cache";
+import type { InferenceCredentialCheck } from "@/lib/services/inference-credential-revocation";
 import type { EndpointType } from "@/lib/services/org-rate-limits";
 import type { OrganizationInferenceAdmission } from "@/lib/services/organization-inference-admission";
 import { logger } from "@/lib/utils/logger";
@@ -33,6 +34,8 @@ export interface GenerativeRouteCaller {
   apiKeyId: string | null;
   authSource: "combined_cache" | "compatibility";
   admissionSnapshot?: InferenceAdmissionSnapshot;
+  /** Strong credential proof fused into the durable admission lease. */
+  credential?: InferenceCredentialCheck;
   appScopeId: string | null;
 }
 
@@ -337,6 +340,10 @@ export async function admitFlatGenerativeOperation(params: {
 export async function requireGenerativeRouteCaller(
   c: AppContext,
   options: {
+    /** Effective request after any route-local credential rewrite. */
+    request?: Request;
+    /** The caller will fuse this strong proof into its durable admission. */
+    deferStrongCredentialCheck?: boolean;
     compatibility?: "hono" | "raw";
     rateLimitEndpoint?: EndpointType;
     /**
@@ -346,10 +353,11 @@ export async function requireGenerativeRouteCaller(
     awaitWarmingMs?: number;
   } = {},
 ): Promise<GenerativeRouteCaller> {
+  const request = options.request ?? c.req.raw;
   const executionCtx = getGenerativeExecutionContext(c);
   if (!executionCtx) {
     if (options.compatibility === "raw") {
-      const { user, apiKey } = await requireAuthOrApiKeyWithOrg(c.req.raw);
+      const { user, apiKey } = await requireAuthOrApiKeyWithOrg(request);
       return {
         user: { id: user.id, organization_id: user.organization_id },
         apiKeyId: apiKey?.id ?? null,
@@ -372,11 +380,14 @@ export async function requireGenerativeRouteCaller(
     "@/lib/services/inference-auth-context"
   );
   const resolveCallerAuth = () =>
-    resolveInferenceAuthContext(c.req.raw, {
+    resolveInferenceAuthContext(request, {
       traceId: c.get("traceId") ?? c.get("requestId"),
       cacheOnly: Boolean(executionCtx),
       executionCtx,
       inlineContinuationDeadlineMs: options.awaitWarmingMs,
+      ...(options.deferStrongCredentialCheck
+        ? { deferStrongCredentialCheck: true }
+        : {}),
     });
   const resolution = await resolveCallerAuth();
 
@@ -421,6 +432,9 @@ export async function requireGenerativeRouteCaller(
           limited.status === 429
             ? "Rate limit exceeded"
             : "Rate limiter is unavailable",
+          limited.status === 503
+            ? { retryable: true, retryAfterSeconds: 1 }
+            : undefined,
         );
       }
     }
@@ -429,6 +443,7 @@ export async function requireGenerativeRouteCaller(
       apiKeyId: resolution.ctx.apiKeyId,
       authSource: "combined_cache",
       admissionSnapshot: resolution.ctx.admission,
+      ...(resolution.credential ? { credential: resolution.credential } : {}),
       appScopeId:
         "appScopeId" in resolution.ctx ? resolution.ctx.appScopeId : null,
     };
@@ -468,7 +483,7 @@ export async function requireGenerativeRouteCaller(
   // authoritative compatibility path. API keys and Steward sessions never
   // reach this branch.
   if (options.compatibility === "raw") {
-    const { user, apiKey } = await requireAuthOrApiKeyWithOrg(c.req.raw);
+    const { user, apiKey } = await requireAuthOrApiKeyWithOrg(request);
     return {
       user: { id: user.id, organization_id: user.organization_id },
       apiKeyId: apiKey?.id ?? null,

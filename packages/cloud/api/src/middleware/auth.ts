@@ -266,6 +266,45 @@ export function isRouteAuthenticatedInferencePath(
 }
 
 /**
+ * Paid proxy routes own their combined identity, standing, and organization
+ * admission decision. The global session gate must not resolve the same
+ * Steward credential first, or a session request would perform an additional
+ * authoritative user lookup before the route's one-read cache decision.
+ */
+export function isRouteAuthenticatedPaidProxyPath(
+  method: string,
+  pathname: string,
+): boolean {
+  if (method === "OPTIONS") {
+    return (
+      isRouteAuthenticatedPaidProxyPath("GET", pathname) ||
+      isRouteAuthenticatedPaidProxyPath("POST", pathname)
+    );
+  }
+  if (method === "GET") {
+    return (
+      /^\/api\/v1\/chain\/(?:nfts|tokens|transfers)\/[^/]+\/[^/]+\/?$/.test(
+        pathname,
+      ) ||
+      /^\/api\/v1\/market\/(?:candles|portfolio|price|token|trades)\/[^/]+\/[^/]+\/?$/.test(
+        pathname,
+      ) ||
+      /^\/api\/v1\/solana\/(?:assets|token-accounts|transactions)\/[^/]+\/?$/.test(
+        pathname,
+      ) ||
+      /^\/api\/v1\/apis\/birdeye\/.+/.test(pathname)
+    );
+  }
+  if (method !== "POST") return false;
+  return (
+    /^\/api\/v1\/proxy\/evm-rpc\/[^/]+\/?$/.test(pathname) ||
+    /^\/api\/v1\/proxy\/solana-rpc\/?$/.test(pathname) ||
+    /^\/api\/v1\/rpc\/[^/]+\/?$/.test(pathname) ||
+    /^\/api\/v1\/solana\/rpc\/?$/.test(pathname)
+  );
+}
+
+/**
  * Remote hosts reach these activation handlers before they have a Cloud
  * session. Keep this pre-auth delegation exact: a syntactically valid,
  * host-bound credential may reach only the two handlers introduced by the
@@ -361,6 +400,11 @@ export const authMiddleware: MiddlewareHandler<AppEnv> = async (c, next) => {
   }
 
   if (isRouteAuthenticatedInferencePath(c.req.method, pathname)) {
+    await next();
+    return;
+  }
+
+  if (isRouteAuthenticatedPaidProxyPath(c.req.method, pathname)) {
     await next();
     return;
   }
